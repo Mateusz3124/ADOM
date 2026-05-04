@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import pickle
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Sequence
 
 import cv2
 import numpy as np
@@ -33,6 +34,9 @@ class BagOfVisualWordsClassifier:
         self.kmeans: MiniBatchKMeans | None = None
         self.classifier: LinearSVC | None = None
         self.class_names: list[str] = []
+        self._reset_rng()
+
+    def _reset_rng(self) -> None:
         self._rng = np.random.default_rng(self.config.random_state)
 
     @staticmethod
@@ -191,6 +195,7 @@ class BagOfVisualWordsClassifier:
     def evaluate(self, test_dir: str | Path) -> dict[str, object]:
         if self.classifier is None:
             raise RuntimeError("Call fit() before evaluate().")
+        self._reset_rng()
         test_paths, test_labels = self._iter_image_files(test_dir)
         predictions = self.predict(test_paths)
         accuracy = accuracy_score(test_labels, predictions)
@@ -208,6 +213,34 @@ class BagOfVisualWordsClassifier:
     def classify_image(self, image_path: str | Path) -> str:
         prediction = self.predict([image_path])
         return str(prediction[0])
+
+    def save(self, model_path: str | Path) -> Path:
+        if self.kmeans is None or self.classifier is None:
+            raise RuntimeError("Train the model before saving it.")
+        model_path = Path(model_path)
+        if model_path.suffix == "":
+            model_path = model_path.with_suffix(".pkl")
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "config": self.config,
+            "kmeans": self.kmeans,
+            "classifier": self.classifier,
+            "class_names": self.class_names,
+        }
+        with model_path.open("wb") as file_handle:
+            pickle.dump(payload, file_handle, protocol=pickle.HIGHEST_PROTOCOL)
+        return model_path
+
+    @classmethod
+    def load(cls, model_path: str | Path) -> "BagOfVisualWordsClassifier":
+        model_path = Path(model_path)
+        with model_path.open("rb") as file_handle:
+            payload = pickle.load(file_handle)
+        model = cls(payload["config"])
+        model.kmeans = payload["kmeans"]
+        model.classifier = payload["classifier"]
+        model.class_names = list(payload["class_names"])
+        return model
 
 
 def load_split(split_dir: str | Path) -> tuple[list[Path], list[str]]:
