@@ -20,8 +20,8 @@ A Python implementation of the Bag of Visual Words algorithm for image classific
 ├── requirements.txt                # Python dependencies
 ├── caltech101_train_test_split.py  # Script for spliting dataset
 ├── artifacts/                      # Directory for saving trained models
-├── images_all_reduced/             # Example dataset (from Caltech101)
-└── images_all_balanced.zip         # Balanced Daltech101 dataset
+├── caltech101_reduced/             # Example dataset (from Caltech101)
+└── caltech101_balanced.zip         # Balanced Daltech101 dataset
 ```
 
 ## Installation
@@ -70,15 +70,15 @@ config = BoVWConfig(
 
 # Create and train the model
 model = BagOfVisualWordsClassifier(config)
-model.fit(Path('images_all_reduced/train'))
+model.fit(Path('caltech101_reduced/train'))
 
 # Evaluate on test set
-metrics = model.evaluate(Path('images_all_reduced/test'))
+metrics = model.evaluate(Path('caltech101_reduced/test'))
 print(f"Accuracy: {metrics['accuracy']:.4f}")
 print(metrics['classification_report'])
 
 # Classify a single image
-prediction = model.classify_image(Path('images_all_reduced/test/accordion/image.jpg'))
+prediction = model.classify_image(Path('caltech101_reduced/test/accordion/image.jpg'))
 print(f"Prediction: {prediction}")
 
 # Save the trained model
@@ -221,8 +221,8 @@ from bovw import BagOfVisualWordsClassifier, BoVWConfig
 for extractor in ['SIFT', 'ORB', 'AKAZE']:
     config = BoVWConfig(feature_extractor=extractor)
     model = BagOfVisualWordsClassifier(config)
-    model.fit('images_all_reduced/train')
-    metrics = model.evaluate('images_all_reduced/test')
+    model.fit('caltech101_reduced/train')
+    metrics = model.evaluate('caltech101_reduced/test')
     print(f"{extractor}: {metrics['accuracy']:.4f}")
 ```
 
@@ -239,8 +239,8 @@ results = []
 for vocab_size, extractor in itertools.product(vocab_sizes, extractors):
     config = BoVWConfig(vocabulary_size=vocab_size, feature_extractor=extractor)
     model = BagOfVisualWordsClassifier(config)
-    model.fit('images_all_reduced/train')
-    metrics = model.evaluate('images_all_reduced/test')
+    model.fit('caltech101_reduced/train')
+    metrics = model.evaluate('caltech101_reduced/test')
     results.append({
         'extractor': extractor,
         'vocab_size': vocab_size,
