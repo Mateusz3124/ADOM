@@ -1,6 +1,6 @@
 # Bag of Visual Words (BoVW) Classifier
 
-A Python implementation of the Bag of Visual Words algorithm for image classification. This project can be used to train BoVW models on image datasets using multiple feature extractors (SIFT, SURF, ORB, AKAZE, BRISK, KAZE).
+A Python implementation of the Bag of Visual Words algorithm for image classification and image retrieval. This project can be used to train BoVW models on image datasets using multiple feature extractors (SIFT, SURF, ORB, AKAZE, BRISK, KAZE).
 
 ## Features
 
@@ -8,20 +8,22 @@ A Python implementation of the Bag of Visual Words algorithm for image classific
 - **Configurable Pipeline**: Fine-tune vocabulary size, descriptor sampling, image resizing, and classifier parameters
 - **Spatial Pyramid Matching**: Multi-scale feature extraction for improved accuracy
 - **Model Persistence**: Save and load trained models for reproducible inference
-- **Comprehensive Metrics**: Accuracy, classification report, and confusion matrix
+- **Image Search**: Build and persist a retrieval index, then query similar images with cosine similarity or Euclidean distance
+- **Retrieval Metrics**: Precision@k, Recall@k, Average Precision (AP), and Mean Average Precision (mAP)
+- **Classification Metrics**: Accuracy, classification report, and confusion matrix
 
 ## Project Structure
 
 ```
 ├── bovw.py                         # Core BoVW classifier implementation
 ├── bovw_demo.ipynb                 # Basic training and evaluation demo
-├── bovw_demo_large_dataset.ipynb   # Training and evaluation demo on larger dataset
 ├── bovw_save_load_demo.ipynb       # Model persistence demonstration
+├── bovw_search_demo.ipynb          # Image search and retrieval metrics demo
 ├── requirements.txt                # Python dependencies
-├── caltech101_train_test_split.py  # Script for spliting dataset
+├── caltech101_train_test_split.py  # Script for splitting dataset
 ├── artifacts/                      # Directory for saving trained models
 ├── caltech101_reduced/             # Example dataset (from Caltech101)
-└── caltech101_balanced.zip         # Balanced Daltech101 dataset
+└── caltech101_balanced.zip         # Balanced Caltech101 dataset
 ```
 
 ## Installation
@@ -86,6 +88,21 @@ model.save('artifacts/my_model.pkl')
 
 # Load the model later
 loaded_model = BagOfVisualWordsClassifier.load('artifacts/my_model.pkl')
+
+# Build an image search index and query similar images
+test_images = sorted(
+  p for p in Path('caltech101_reduced/test').rglob('*')
+  if p.suffix.lower() in {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp'}
+)
+loaded_model.index_dataset(test_images, use_tfidf=True)
+results = loaded_model.query(Path('caltech101_reduced/test/accordion/image_0010.jpg'), top_k=5)
+
+# Evaluate retrieval quality with ranking metrics
+metrics = loaded_model.evaluate_retrieval(
+  [Path('caltech101_reduced/test/accordion/image_0010.jpg')],
+  top_k=5,
+)
+print(metrics['mean_precision_at_k'], metrics['mean_recall_at_k'], metrics['mean_average_precision'])
 ```
 
 ## Configuration Parameters
@@ -135,6 +152,14 @@ Demonstrates model persistence:
 - Load it back
 - Verify the loaded model predictions
 
+### 3. `bovw_search_demo.ipynb`
+
+Demonstrates image retrieval:
+- Train the BoVW model
+- Build and persist a retrieval index
+- Query similar images with cosine or Euclidean distance
+- Evaluate Precision@k, Recall@k, AP, and mAP across multiple queries
+
 ## Dataset Format
 
 Images must be organized in the following structure:
@@ -159,7 +184,7 @@ dataset_root/
 
 Supported image formats: `.jpg`, `.jpeg`, `.png`, `.bmp`, `.tif`, `.tiff`, `.webp`
 
-This project uses selected images form the Caltech101 dataset for training. To train the model on the whole datset download the dataset (https://data.caltech.edu/records/mzrjq-6wc02) and split it into train and test splits using the ```caltech101_train_test_split.py``` script:
+This project uses selected images from the Caltech101 dataset for training. To train the model on the whole dataset, download the dataset (https://data.caltech.edu/records/mzrjq-6wc02) and split it into train and test splits using the ```caltech101_train_test_split.py``` script:
 
 ```bash
 python caltech101_train_test_split.py [-h] [--test_ratio TEST_RATIO] [--seed SEED] [--balanced] dataset_dir output_dir
@@ -183,6 +208,21 @@ python caltech101_train_test_split.py [-h] [--test_ratio TEST_RATIO] [--seed SEE
 - **`evaluate(test_dir: str | Path) -> dict`**
   - Evaluate on a test set directory
   - Returns dict with keys: `accuracy`, `classification_report`, `confusion_matrix`, `y_true`, `y_pred`, `image_paths`
+
+- **`index_dataset(image_paths: Sequence[str | Path], use_tfidf: bool = False) -> None`**
+  - Build an in-memory retrieval index from image paths
+  - Optionally enable TF-IDF weighting for the indexed histograms
+
+- **`query(query_image: str | Path, top_k: int = 5, metric: str = "cosine", use_tfidf: bool | None = None)`**
+  - Retrieve the most similar images for a query image
+  - Supports cosine similarity, Euclidean distance, and other pairwise metrics
+
+- **`save_index(index_path: str | Path) -> Path`** / **`load_index(index_path: str | Path) -> BagOfVisualWordsClassifier`**
+  - Save and restore the retrieval index from disk
+
+- **`evaluate_retrieval(query_paths: Sequence[str | Path], top_k: int = 10, metric: str = "cosine", use_tfidf: bool | None = None, exclude_query: bool = True) -> dict`**
+  - Evaluate retrieval quality for a list of queries
+  - Returns per-query AP values plus mean Precision@k, mean Recall@k, and mAP
 
 
 - **`predict(image_paths: Sequence[str | Path]) -> np.ndarray`**
@@ -208,6 +248,9 @@ python caltech101_train_test_split.py [-h] [--test_ratio TEST_RATIO] [--seed SEE
 
 - **`supported_extractors() -> list[str]`** (static method)
   - Get list of available feature extractors for current OpenCV installation
+
+- **`precision_at_k(...)`, `recall_at_k(...)`, `average_precision(...)`, `mean_average_precision(...)`**
+  - Standalone helpers for ranking evaluation on binary relevance lists
 
 
 
@@ -270,6 +313,30 @@ for img_path, pred in zip(test_images, predictions):
     print(f"{img_path.name}: {pred}")
 ```
 
+### Image Search and Retrieval Metrics
+
+```python
+from pathlib import Path
+from bovw import BagOfVisualWordsClassifier
+
+model = BagOfVisualWordsClassifier.load('artifacts/bovw_model.pkl')
+test_images = sorted(Path('caltech101_reduced/test').rglob('*.jpg'))
+
+# Build and save the search index
+model.index_dataset(test_images, use_tfidf=True)
+model.save_index('artifacts/bovw_search_index.pkl')
+
+# Query the index
+query_path = test_images[0]
+results = model.query(query_path, top_k=10, metric='cosine')
+
+# Evaluate retrieval on multiple queries
+metrics = model.evaluate_retrieval(test_images[:25], top_k=10, metric='cosine')
+print(metrics['mean_precision_at_k'])
+print(metrics['mean_recall_at_k'])
+print(metrics['mean_average_precision'])
+```
+
 ## Troubleshooting
 
 ### ImportError: No module named 'cv2'
@@ -297,4 +364,10 @@ These feature extractors are inherently slower on large vocabularies. Try:
 - Reducing `vocabulary_size`
 - Reducing `max_descriptors_per_image`
 - Using a GPU-accelerated OpenCV build
+
+### Retrieval metrics look low
+
+- Make sure the index was built with the same `use_tfidf` setting used at query time.
+- Check that relevance is defined by class folder names, so queries and results must come from the same dataset split layout.
+- Increase `top_k` if you want recall-oriented reporting over a larger slice of the ranking.
 

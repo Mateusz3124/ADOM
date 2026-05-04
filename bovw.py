@@ -8,9 +8,12 @@ from typing import Sequence
 import cv2
 import numpy as np
 from sklearn.cluster import MiniBatchKMeans
+from sklearn.feature_extraction.text import TfidfTransformer
+from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.preprocessing import normalize
 from sklearn.svm import LinearSVC
+from sklearn.metrics import pairwise_distances
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 
@@ -214,6 +217,158 @@ class BagOfVisualWordsClassifier:
         prediction = self.predict([image_path])
         return str(prediction[0])
 
+    def index_dataset(self, image_paths: Sequence[str | Path], use_tfidf: bool = False) -> None:
+        """
+        Build an index of BoVW histograms for the given image paths.
+
+        Args:
+            image_paths: Sequence of image file paths to index.
+            use_tfidf: If True, fit a TF-IDF transformer on the histograms and
+                      store TF-IDF-weighted features for retrieval.
+        """
+        if self.kmeans is None:
+            raise RuntimeError("Call fit() before indexing dataset.")
+        # Ensure deterministic sampling
+        self._reset_rng()
+        # Compute histograms for all images
+        paths = [Path(p) for p in image_paths]
+        features = self.transform(paths)
+        self._index_paths = paths
+        self._tfidf = None
+        if use_tfidf:
+            transformer = TfidfTransformer(norm="l2", use_idf=True)
+            features = transformer.fit_transform(features).toarray()
+            self._tfidf = transformer
+        # store as float32
+        self._index_features = np.asarray(features, dtype=np.float32)
+        self._index_use_tfidf = use_tfidf
+
+    def query(self, query_image: str | Path, top_k: int = 5, metric: str = "cosine", use_tfidf: bool | None = None):
+        """
+        Retrieve top-k images similar to the query image.
+
+        Args:
+            query_image: Path to the query image.
+            top_k: Number of neighbors to return.
+            metric: Similarity metric to use: 'cosine' or 'euclidean'.
+            use_tfidf: If True/False, override whether TF-IDF is applied to the
+                       query. If None, uses whatever was used when indexing.
+
+        Returns:
+            List of tuples (Path, score) where score is similarity for cosine
+            or distance for euclidean. Sorted best-first.
+        """
+        if not hasattr(self, "_index_features") or len(self._index_features) == 0:
+            raise RuntimeError("Index is empty. Call index_dataset() before querying.")
+        q_desc = self.extract_descriptors(query_image)
+        q_hist = self._image_histogram(q_desc).reshape(1, -1)
+        # Apply TF-IDF if requested or if index used it
+        index_uses_tfidf = bool(getattr(self, "_index_use_tfidf", False))
+        if use_tfidf is None:
+            use_tfidf = index_uses_tfidf
+        if use_tfidf != index_uses_tfidf:
+            raise RuntimeError("TF-IDF usage must match the way the index was built. Rebuild or reload the index with the desired setting.")
+        if use_tfidf:
+            if getattr(self, "_tfidf", None) is None:
+                raise RuntimeError("Index was not built with TF-IDF. Rebuild index with use_tfidf=True to use TF-IDF.")
+            q_hist = self._tfidf.transform(q_hist).toarray()
+
+        feats = self._index_features
+        if metric.lower() == "cosine":
+            sims = cosine_similarity(q_hist, feats)[0]
+            # higher is better
+            idx = np.argsort(-sims)[:top_k]
+            return [(self._index_paths[i], float(sims[i])) for i in idx]
+        elif metric.lower() in {"euclidean", "l2"}:
+            dists = np.linalg.norm(feats - q_hist, axis=1)
+            idx = np.argsort(dists)[:top_k]
+            return [(self._index_paths[i], float(dists[i])) for i in idx]
+        else:
+            # fallback to sklearn pairwise distances for other metrics
+            dists = pairwise_distances(q_hist, feats, metric=metric)[0]
+            idx = np.argsort(dists)[:top_k]
+            return [(self._index_paths[i], float(dists[i])) for i in idx]
+
+    def save_index(self, index_path: str | Path) -> Path:
+        if not hasattr(self, "_index_features") or len(self._index_features) == 0:
+            raise RuntimeError("Build an index before saving it.")
+        index_path = Path(index_path)
+        if index_path.suffix == "":
+            index_path = index_path.with_suffix(".pkl")
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "index_paths": [str(path) for path in self._index_paths],
+            "index_features": self._index_features,
+            "index_use_tfidf": bool(getattr(self, "_index_use_tfidf", False)),
+            "tfidf": getattr(self, "_tfidf", None),
+        }
+        with index_path.open("wb") as file_handle:
+            pickle.dump(payload, file_handle, protocol=pickle.HIGHEST_PROTOCOL)
+        return index_path
+
+    def load_index(self, index_path: str | Path) -> "BagOfVisualWordsClassifier":
+        index_path = Path(index_path)
+        with index_path.open("rb") as file_handle:
+            payload = pickle.load(file_handle)
+        self._index_paths = [Path(path) for path in payload["index_paths"]]
+        self._index_features = np.asarray(payload["index_features"], dtype=np.float32)
+        self._index_use_tfidf = bool(payload.get("index_use_tfidf", False))
+        self._tfidf = payload.get("tfidf", None)
+        return self
+
+    def evaluate_retrieval(
+        self,
+        query_paths: Sequence[str | Path],
+        top_k: int = 10,
+        metric: str = "cosine",
+        use_tfidf: bool | None = None,
+        exclude_query: bool = True,
+    ) -> dict:
+        """
+        Evaluate retrieval performance for a set of queries.
+
+        Returns a dict with per-query APs and aggregated Precision@k, Recall@k, and mAP.
+        """
+        if not hasattr(self, "_index_features") or len(self._index_features) == 0:
+            raise RuntimeError("Index is empty. Call index_dataset() before evaluating retrieval.")
+        # Use full ranking for AP calculation (full index)
+        index_size = len(self._index_paths)
+        per_query_results = []
+        precisions = []
+        recalls = []
+        aps = []
+        for qp in query_paths:
+            qp = Path(qp)
+            # get full ranking
+            ranked = self.query(qp, top_k=index_size, metric=metric, use_tfidf=use_tfidf)
+            ranked_paths = [p for p, _ in ranked]
+            # Optionally remove the query itself from the ranking
+            if exclude_query:
+                ranked_paths = [p for p in ranked_paths if p != qp]
+            # compute relevance vector (True if same class)
+            query_class = qp.parent.name
+            relevant = [1 if p.parent.name == query_class else 0 for p in ranked_paths]
+            total_relevant = sum(1 for p in self._index_paths if p.parent.name == query_class and (not exclude_query or p != qp))
+            # Precision@k and Recall@k
+            p_at_k = precision_at_k(relevant, top_k)
+            r_at_k = recall_at_k(relevant, top_k, total_relevant)
+            ap = average_precision(relevant)
+            per_query_results.append({"query": str(qp), "precision_at_k": p_at_k, "recall_at_k": r_at_k, "ap": ap})
+            precisions.append(p_at_k)
+            recalls.append(r_at_k)
+            aps.append(ap)
+
+        mean_p_at_k = float(np.mean(precisions)) if precisions else 0.0
+        mean_r_at_k = float(np.mean(recalls)) if recalls else 0.0
+        mean_ap = float(np.mean(aps)) if aps else 0.0
+        return {
+            "per_query": per_query_results,
+            "mean_precision_at_k": mean_p_at_k,
+            "mean_recall_at_k": mean_r_at_k,
+            "mean_average_precision": mean_ap,
+            "per_query_ap": aps,
+        }
+
     def save(self, model_path: str | Path) -> Path:
         if self.kmeans is None or self.classifier is None:
             raise RuntimeError("Train the model before saving it.")
@@ -268,3 +423,71 @@ def train_and_evaluate(
     model.fit(dataset_root / "train")
     metrics = model.evaluate(dataset_root / "test")
     return model, metrics
+
+
+def precision_at_k(relevant: Sequence[int | bool], k: int) -> float:
+    """Compute Precision@k for a binary relevance list (1/0 or True/False).
+
+    Args:
+        relevant: sequence indicating relevance in ranked order (1/0 or True/False).
+        k: cutoff for precision.
+    Returns:
+        Precision@k as float.
+    """
+    if k <= 0:
+        raise ValueError("k must be > 0")
+    rel = np.asarray(relevant, dtype=np.int32)
+    top = rel[:k]
+    return float(np.sum(top) / k)
+
+
+def recall_at_k(relevant: Sequence[int | bool], k: int, total_relevant: int | None = None) -> float:
+    """Compute Recall@k.
+
+    Args:
+        relevant: sequence indicating relevance in ranked order.
+        k: cutoff for recall.
+        total_relevant: total number of relevant items in the collection. If None,
+                        uses the number of relevant items present in `relevant`.
+    Returns:
+        Recall@k as float.
+    """
+    if k <= 0:
+        raise ValueError("k must be > 0")
+    rel = np.asarray(relevant, dtype=np.int32)
+    if total_relevant is None:
+        total_relevant = int(np.sum(rel))
+    if total_relevant == 0:
+        return 0.0
+    top_hits = int(np.sum(rel[:k]))
+    return float(top_hits / total_relevant)
+
+
+def average_precision(relevant: Sequence[int | bool]) -> float:
+    """Compute Average Precision (AP) for a binary relevance sequence.
+
+    AP = sum_k (Precision@k * rel_k) / num_relevant
+    Returns 0.0 if there are no relevant documents.
+    """
+    rel = np.asarray(relevant, dtype=np.int32)
+    num_relevant = int(np.sum(rel))
+    if num_relevant == 0:
+        return 0.0
+    precisions = []
+    for i in range(1, len(rel) + 1):
+        if rel[i - 1]:
+            precisions.append(np.sum(rel[:i]) / float(i))
+    if not precisions:
+        return 0.0
+    return float(np.sum(precisions) / num_relevant)
+
+
+def mean_average_precision(list_of_relevant: Sequence[Sequence[int | bool]]) -> float:
+    """Compute Mean Average Precision (mAP) over a list of relevance sequences.
+
+    Each element in `list_of_relevant` is a ranked binary relevance sequence for a query.
+    """
+    aps = [average_precision(seq) for seq in list_of_relevant]
+    if not aps:
+        return 0.0
+    return float(np.mean(aps))
