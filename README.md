@@ -2,6 +2,10 @@
 
 A Python implementation of the Bag of Visual Words algorithm for image classification and image retrieval. This project can be used to train BoVW models on image datasets using multiple feature extractors (SIFT, SURF, ORB, AKAZE, BRISK, KAZE).
 
+## Datasets
+
+Due to large size one of datasets need to be downloaded from: https://github.com/gurkandemir/Bag-of-Visual-Words/tree/master/dataset
+
 ## Features
 
 - **Multiple Feature Extractors**: Support for SIFT, SURF, ORB, AKAZE, BRISK, and KAZE
